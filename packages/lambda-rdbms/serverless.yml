@@ -1,0 +1,211 @@
+service: dev-lambda-rdbms
+
+provider:
+  name: aws
+  runtime: nodejs8.10
+  stage: prod
+
+plugins:
+  - serverless-prune-plugin
+  - "@vingle/serverless-tag-plugin"
+
+custom:
+  prune:
+    automatic: true
+    number: 5
+
+package:
+  artifact: dst.zip
+
+functions:
+  routes:
+    role: lambdaRole
+    handler: api.handler
+    memorySize: 256
+    timeout: 20
+    vpc:
+      securityGroupIds:
+        - Fn::GetAtt: ServerlessSecurityGroup.GroupId
+        - Fn::GetAtt: ServerlessEC2DatabaseSecurityGroup.GroupId
+        - Fn::GetAtt: ServerlessStorageSecurityGroup.GroupId
+      subnetIds:
+        - !Ref PrivateSubnetA
+        - !Ref PrivateSubnetB
+    events:
+      - http:
+          path: /
+          method: any
+      - http:
+          path: /{proxy+}
+          method: any
+    environment:
+      DATABASE_HOST:
+        Fn::GetAtt: [RDSDBInstance, Endpoint.Address]
+      PGDATABASE: postgres
+      PGUSER: ${file(./env/private.yml):DATABASE_ID}
+      DATABASE_PORT:
+        Fn::GetAtt: [RDSDBInstance, Endpoint.Port]
+      DATABASE_ID: ${file(./env/private.yml):DATABASE_ID}
+      DATABASE_PASSWORD: ${file(./env/private.yml):DATABASE_PASSWORD}
+      REDIS_HOST:
+        Fn::GetAtt: [ElasticCacheCluster, RedisEndpoint.Address]
+      REDIS_PORT:
+        Fn::GetAtt: [ElasticCacheCluster, RedisEndpoint.Port]
+
+resources:
+  Resources:
+    lambdaRole:
+      Type: AWS::IAM::Role
+      Properties:
+        RoleName: dev-lambda-rdbms-policy
+        AssumeRolePolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+            - Effect: Allow
+              Principal:
+                Service:
+                  - "lambda.amazonaws.com"
+                  - "edgelambda.amazonaws.com"
+              Action: sts:AssumeRole
+        ManagedPolicyArns:
+          - arn:aws:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole
+        Policies:
+          - PolicyName: dev-lambda-rdbms-policy
+            PolicyDocument:
+              Version: '2012-10-17'
+              Statement:
+                - Effect: "Allow"
+                  Action:
+                    - "rds:*"
+                  Resource: "*"
+                - Effect: "Allow"
+                  Action:
+                    - "elasticache:*"
+                  Resource: "*"
+                - Effect: "Allow"
+                  Action:
+                    - "lambda:*"
+                  Resource: "*"
+    VPC: 
+      Type: AWS::EC2::VPC
+      Properties:
+        CidrBlock: 10.0.0.0/16
+        Tags: 
+          - Key: Name 
+            Value: dev-lambda-rdbms
+
+    PrivateSubnetA:
+      DependsOn: VPC
+      Type: AWS::EC2::Subnet
+      Properties:
+        VpcId: !Ref VPC
+        AvailabilityZone: ${self:provider.region}a
+        CidrBlock: "10.0.1.0/24"
+
+    PublicSubnetA:
+      DependsOn: VPC
+      Type: AWS::EC2::Subnet
+      Properties:
+        VpcId: !Ref VPC
+        AvailabilityZone: ${self:provider.region}a
+        CidrBlock: "10.0.2.0/24"
+
+    PrivateSubnetB:
+      DependsOn: VPC
+      Type: AWS::EC2::Subnet
+      Properties:
+        VpcId: !Ref VPC
+        AvailabilityZone: ${self:provider.region}b
+        CidrBlock: "10.0.3.0/24"
+
+    PublicSubnetB:
+      DependsOn: VPC
+      Type: AWS::EC2::Subnet
+      Properties:
+        VpcId: !Ref VPC
+        AvailabilityZone: ${self:provider.region}b
+        CidrBlock: "10.0.4.0/24"
+
+    ServerlessSecurityGroup:
+      DependsOn: VPC
+      Type: AWS::EC2::SecurityGroup
+      Properties:
+        GroupDescription: Dev Lambda-RDBMS Connection Security Group
+        VpcId: !Ref VPC
+
+    ServerlessStorageSecurityGroup:
+      DependsOn: VPC
+      Type: AWS::EC2::SecurityGroup
+      Properties:
+        GroupDescription: Ingress for Redis Cluster (Dev-Lambda-RDBMS)
+        VpcId: !Ref VPC
+        SecurityGroupIngress:
+          - IpProtocol: tcp
+            FromPort: '6379'
+            ToPort: '6379'
+            SourceSecurityGroupId: !Ref ServerlessSecurityGroup
+
+    ServerlessCacheSubnetGroup:
+      Type: AWS::ElastiCache::SubnetGroup
+      Properties:
+        Description: "Cache Subnet Group"
+        SubnetIds: 
+          - !Ref PrivateSubnetA
+          - !Ref PrivateSubnetB
+
+    ServerlessDatabaseSubnetGroup:
+      Type: AWS::RDS::DBSubnetGroup
+      Properties:
+        DBSubnetGroupDescription: "Database Subnet Group"
+        SubnetIds: 
+          - !Ref PrivateSubnetA
+          - !Ref PrivateSubnetB
+
+    ServerlessEC2DatabaseSecurityGroup:
+      DependsOn: VPC
+      Type: AWS::EC2::SecurityGroup
+      Properties:
+        GroupDescription: Ingress for PostgreSQL (Dev-Lambda-RDBMS)
+        VpcId: !Ref VPC
+        SecurityGroupIngress:
+          - IpProtocol: tcp
+            FromPort: '5432'
+            ToPort: '5432'
+            SourceSecurityGroupId: !Ref ServerlessSecurityGroup
+
+    ServerlessDatabaseSecurityGroup:
+      DependsOn: VPC
+      Type: AWS::RDS::DBSecurityGroup
+      Properties:
+        GroupDescription: Ingress for PostgreSQL (Dev-Lambda-RDBMS)
+        EC2VpcId: !Ref VPC
+        DBSecurityGroupIngress:
+          - EC2SecurityGroupId: !Ref ServerlessEC2DatabaseSecurityGroup
+
+    RDSDBInstance:
+      DependsOn: ServerlessDatabaseSecurityGroup
+      Type: AWS::RDS::DBInstance
+      Properties:
+        DBInstanceIdentifier: dev-serverless-postgres
+        Engine: postgres
+        PubliclyAccessible: 'false'
+        DBInstanceClass: db.t2.small
+        StorageType: standard
+        AllocatedStorage: 20
+        MasterUsername: ${file(./env/private.yml):DATABASE_ID}
+        MasterUserPassword: ${file(./env/private.yml):DATABASE_PASSWORD}
+        DBSecurityGroups:
+          - !Ref ServerlessDatabaseSecurityGroup
+        DBSubnetGroupName: !Ref ServerlessDatabaseSubnetGroup
+
+    ElasticCacheCluster:
+      DependsOn: ServerlessStorageSecurityGroup
+      Type: AWS::ElastiCache::CacheCluster
+      Properties:
+        AutoMinorVersionUpgrade: true
+        Engine: redis
+        CacheNodeType: cache.t2.micro
+        NumCacheNodes: 1
+        VpcSecurityGroupIds:
+        - Fn::GetAtt: ServerlessStorageSecurityGroup.GroupId
+        CacheSubnetGroupName: !Ref ServerlessCacheSubnetGroup
