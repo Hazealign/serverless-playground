@@ -34,7 +34,7 @@
     "@vingle/tslint-preset": "1.0.0",
     "chai": "4.2.0",
     "check-engine": "1.8.0",
-    "class-transformer": "^0.2.3",
+    "class-transformer": "^0.3.1",
     "local-dynamo": "0.5.0",
     "mocha": "5.2.0",
     "serverless": "1.45.1",
